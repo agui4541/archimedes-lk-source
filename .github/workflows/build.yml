@@ -1,25 +1,59 @@
-name: Build workflow
+name: Build Archimedes LK
 
 on:
   push:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   lk-build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [archimedes_eng, archimedes_64]
 
     steps:
-    - name: Checkout sources
-      uses: actions/checkout@v2
-    - name: Install pyhton2
-      run: sudo apt-get install python2
-    - name: Build the bootloader
-      run: |
-        export python=python2
-        make X5
-    - name : Upload bootloader
-      uses: actions/upload-artifact@v2
-      with:
-        name: X5_lk-signed.img
-        path: /home/runner/work/lk/lk/build-X5/lk-sign.img
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Build native zpipe helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/host-tools
+          gcc -O2 -Wno-unused-result dev/logo/tool/libz/zpipe.c -o out/host-tools/zpipe -lz
+
+      - name: Build ${{ matrix.target }}
+        shell: bash
+        env:
+          JOBS: 4
+        run: |
+          set -euo pipefail
+          out="$GITHUB_WORKSPACE/out/${{ matrix.target }}"
+          make -C "$GITHUB_WORKSPACE" "${{ matrix.target }}" -j"$JOBS" \
+            TARGET_BUILD_VARIANT=eng \
+            BOOTLOADER_OUT="$out" \
+            ZPIPE="$GITHUB_WORKSPACE/out/host-tools/zpipe"
+          build="$out/build-${{ matrix.target }}"
+          test -f "$build/lk-bin.img"
+          dd if="$build/lk-bin.img" of="$build/lk.bin" bs=1M conv=sync status=none
+          cp "$build/lk.bin" "$build/lk2.bin"
+          test "$(stat -c %s "$build/lk.bin")" -eq 1048576
+          ! grep -a -q MT6580 "$build/lk.bin"
+          ! grep -a -q lk_main_dtb "$build/lk.bin"
+
+      - name: Upload ${{ matrix.target }} payloads
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}-lk
+          if-no-files-found: error
+          path: |
+            out/${{ matrix.target }}/build-${{ matrix.target }}/lk.bin
+            out/${{ matrix.target }}/build-${{ matrix.target }}/lk2.bin
+            out/${{ matrix.target }}/build-${{ matrix.target }}/lk.img
+            out/${{ matrix.target }}/build-${{ matrix.target }}/lk-sign.img
+            out/${{ matrix.target }}/build-${{ matrix.target }}/lk-verified.img
